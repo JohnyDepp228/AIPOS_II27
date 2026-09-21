@@ -1,145 +1,271 @@
-#include <stdio.h>
 #include <iostream>
+#include <string>
+#include <atomic>
+#include <vector>
 #include <winsock2.h> 
 #include <windows.h>
 #include <ws2tcpip.h> 
-
+#include <fstream>
 
 #pragma comment(lib, "ws2_32.lib")
 
-#define _WINSOCK_DEPRECATED_NO_WARNINGS
-#define MY_PORT    666
-#define PRINTNUSERS if (nclients)\
-  printf("%d user on-line\n",nclients);\
-  else printf("No User on line\n");
-#define INET_ADDRSTRLEN 1000
-DWORD WINAPI WorkWithClient(LPVOID client_socket);
+class TcpServer {
+private:
+    // Вспомогательная структура для безопасной передачи параметров в поток
+    struct ThreadParam {
+        TcpServer* serverPointer;
+        SOCKET clientSocket;
+    };
 
-// глобальная переменная – количество
-// активных пользователей 
-int nclients = 0;
-
-int main()
-{
-    setlocale(LC_ALL, "RU");
-    char buff[1024];    // Буфер для различных нужд
-    std::cout << "TCP server\n";
-
-    if (WSAStartup(0x0202, (WSADATA*)&buff[0]))
-    {
-        // Ошибка!
-        std::cout << "Error WSAStartup %d\n" << WSAGetLastError();
-        return -1;
+public:
+    // Конструктор инициализирует Winsock и создает слушающий сокет
+    TcpServer(int port) : m_port(port), m_listenSocket(INVALID_SOCKET), m_nclients(0) {
+        WSADATA wsaData;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+            throw std::runtime_error("WSAStartup failed. Error: " + std::to_string(WSAGetLastError()));
+        }
     }
 
-
-    SOCKET mysocket;
-
-    if ((mysocket = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-    {
-        // Ошибка!
-        std::cout << "Error socket %d\n" << WSAGetLastError() << std::endl;
+    // Деструктор гарантирует закрытие ресурсов при уничтожении объекта класса
+    ~TcpServer() {
+        if (m_listenSocket != INVALID_SOCKET) {
+            closesocket(m_listenSocket);
+        }
         WSACleanup();
-
-        return -1;
     }
 
-    // -------------------------------------------
-    // Шаг 3 связывание сокета с локальным адресом
-    // -------------------------------------------
-    sockaddr_in local_addr;
-    local_addr.sin_family = AF_INET;
-    local_addr.sin_port = htons(MY_PORT);
-    // не забываем о сетевом порядке!!!
-    local_addr.sin_addr.s_addr = 0;
-    // сервер принимает подключения
-    // на все IP-адреса
-
-// вызываем bind для связывания
-    if (bind(mysocket, (sockaddr*)&local_addr,
-        sizeof(local_addr)))
-    {
-        // Ошибка
-        std::cout << "Error bind %d\n" << WSAGetLastError() << std::endl;
-        closesocket(mysocket);  // закрываем сокет!
-        WSACleanup();
-        return -1;
-    }
-
-    // -------------------------------------------
-    // Шаг 4 ожидание подключений
-    // -------------------------------------------
-    // размер очереди – 0x100
-    if (listen(mysocket, 0x100))
-    {
-        // Ошибка
-        std::cout << "Error listen %d\n" << WSAGetLastError() << std::endl;
-        closesocket(mysocket);
-        WSACleanup();
-        return -1;
-    }
-
-    std::cout << "Ожидание подключений\n";
-
-    // -------------------------------------------
-    // Шаг 5 извлекаем сообщение из очереди
-    // -------------------------------------------
-    SOCKET client_socket;    // сокет для клиента
-    sockaddr_in client_addr;    // адрес клиента
-    // (заполняется системой)
-
-// функции accept необходимо передать размер
-// структуры
-    int client_addr_size = sizeof(client_addr);
-
-    // цикл извлечения запросов на подключение из
-    // очереди
-    while ((client_socket = accept(mysocket, (sockaddr*)
-        &client_addr, &client_addr_size)))
-    {
-        nclients++;
-        HOSTENT* hst;
-        char host[NI_MAXHOST];
-        if (getnameinfo((sockaddr*)&client_addr, sizeof(client_addr), host, NI_MAXHOST, NULL, 0, 0) == 0) {
-            std::cout << "Host: " << host << "\n";
+    // Запуск сервера: привязка, прослушивание и запуск основного цикла
+    void start() {
+        m_listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (m_listenSocket == INVALID_SOCKET) {
+            throw std::runtime_error("Socket creation failed. Error: " + std::to_string(WSAGetLastError()));
         }
 
-        char ip_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &(client_addr.sin_addr), ip_str, INET_ADDRSTRLEN);
-        std::cout << "new connect! IP: " << ip_str << "\n";
-        PRINTNUSERS
+        sockaddr_in localAddr{};
+        localAddr.sin_family = AF_INET;
+        localAddr.sin_port = htons(m_port);
+        localAddr.sin_addr.s_addr = INADDR_ANY; // Принимаем подключения на все IP-адреса
 
-            DWORD thID;
-        CreateThread(NULL, NULL, WorkWithClient,
-            &client_socket, NULL, &thID);
+        if (bind(m_listenSocket, reinterpret_cast<sockaddr*>(&localAddr), sizeof(localAddr)) == SOCKET_ERROR) {
+            throw std::runtime_error("Bind failed. Error: " + std::to_string(WSAGetLastError()));
+        }
+
+        if (listen(m_listenSocket, SOMAXCONN) == SOCKET_ERROR) {
+            throw std::runtime_error("Listen failed. Error: " + std::to_string(WSAGetLastError()));
+        }
+
+        std::cout << "TCP Server started on port " << m_port << "\n";
+        std::cout << "Ожидание подключений...\n";
+
+        run();
     }
-    return 0;
-}
+
+private:
+    int m_port;
+    SOCKET m_listenSocket;
+    std::atomic<int> m_nclients; // Потокобезопасный счетчик клиентов
+
+    // Вывод количества пользователей в консоль
+    void printUsersCount() const {
+        int currentClients = m_nclients.load();
+        if (currentClients > 0) {
+            std::cout << currentClients << " user(s) on-line\n";
+        }
+        else {
+            std::cout << "No User on line\n";
+        }
+    }
+
+    // Основной цикл обработки входящих подключений
+    void run() {
+        while (true) {
+            sockaddr_in clientAddr{};
+            int clientAddrSize = sizeof(clientAddr);
+
+            SOCKET clientSocket = accept(m_listenSocket, reinterpret_cast<sockaddr*>(&clientAddr), &clientAddrSize);
+            if (clientSocket == INVALID_SOCKET) {
+                std::cerr << "Accept failed. Error: " << WSAGetLastError() << "\n";
+                continue;
+            }
+
+            m_nclients++;
+
+            // Определение имени хоста и IP-адреса клиента
+            char host[NI_MAXHOST] = "";
+            char ipStr[INET_ADDRSTRLEN] = "";
+
+            getnameinfo(reinterpret_cast<sockaddr*>(&clientAddr), clientAddrSize, host, NI_MAXHOST, nullptr, 0, 0);
+            inet_ntop(AF_INET, &(clientAddr.sin_addr), ipStr, INET_ADDRSTRLEN);
+
+            std::cout << "+ Host: " << host << " [" << ipStr << "] new connect!\n";
+            printUsersCount();
+
+            // Создаем структуру с параметрами в динамической памяти, чтобы поток забрал её атомарно
+            ThreadParam* pParam = new ThreadParam{ this, clientSocket };
+
+            // Создаем отдельный поток для обслуживания клиента
+            HANDLE thID = CreateThread(nullptr, 0, clientThreadProxy, pParam, 0, nullptr);
+            if (thID) {
+                CloseHandle(thID); // Закрываем дескриптор потока, он нам больше не нужен в основном цикле
+            }
+            else {
+                std::cerr << "Failed to create thread\n";
+                closesocket(clientSocket);
+                delete pParam; // Очищаем память, если поток не запустился
+                m_nclients--;
+            }
+        }
+    }
+
+    // Статический прокси-метод для CreateThread
+    static DWORD WINAPI clientThreadProxy(LPVOID lpParam) {
+        if (!lpParam) return -1;
+
+        // Извлекаем параметры из переданной структуры
+        ThreadParam* pParam = reinterpret_cast<ThreadParam*>(lpParam);
+        TcpServer* server = pParam->serverPointer;
+        SOCKET clientSock = pParam->clientSocket;
+
+        // Удаляем структуру из памяти, так как мы уже скопировали данные
+        delete pParam;
+
+        // Вызываем метод класса для обработки клиента
+        server->handleClient(clientSock);
+        return 0;
+    }
+
+    void ProccedCommand(const std::string& command, std::string& fileName, std::string& str) {
+        size_t start = command.find('<');
+        if (start == std::string::npos) {
+            str = " ";
+        }
+
+        size_t end = command.find('>', start + 1);
+        if (end == std::string::npos) {
+            str = " ";
+        }
+
+        // 3. Вырезаем текст между ними
+        str = command.substr(start + 1, end - start - 1);
+
+        start = end;
+
+        start = command.find('<', start + 1);
+        if (start == std::string::npos) {
+            fileName = " ";
+        }
+
+        // 2. Ищем вторую кавычку, начиная со следующего символа
+        end = command.find('>', start + 1);
+        if (end == std::string::npos) {
+            fileName = " ";
+        }
+
+        fileName = command.substr(start + 1, end - start - 1);
+    }
+
+    bool CheckForCommand(const std::string& command) {
+        std::string filename;
+        std::string str;
+        if (command.find("find") != std::string::npos) {
+            ProccedCommand(command, filename, str);
+            std::cout << "Filename: " << filename << std::endl;
+            std::cout << "Str: " << str << std::endl;
+            std::cout << "Find: " << FindInFile(filename, str) << std::endl;
+            return true;
+        }
+        else {
+            return false;
+        }
+    }
+
+    int FindInFile(std::string filename, std::string str) {
+        int numOfStr = 0;
+        std::ifstream file(filename);
 
 
-DWORD WINAPI WorkWithClient(LPVOID client_socket)
-{
-    SOCKET my_sock;
-    my_sock = ((SOCKET*)client_socket)[0];
-    char buff[20 * 1024];
-#define sHELLO "Hello, Student!\r\n"
+        if (!file.is_open()) {
+            std::cerr << "Не удалось открыть файл!" << std::endl;
+            return numOfStr;
+        }
 
-    // отправляем клиенту приветствие 
-    send(my_sock, sHELLO, sizeof(sHELLO), 0);
+        std::string line;
+        while (std::getline(file, line)) {
+            if (line.find(str) != std::string::npos) {
+                numOfStr++;
+            }
+        }
 
-    // цикл эхо-сервера: прием строки от клиента и
-    // возвращение ее клиенту
-    int bytes_recv = 0;
-    while ((bytes_recv = recv(my_sock, &buff[0], sizeof(buff), 0)) && bytes_recv != SOCKET_ERROR)
-        send(my_sock, &buff[0], bytes_recv, 0);
-    // если мы здесь, то произошел выход из цикла по
-    // причине возращения функцией recv ошибки –
-    // соединение клиентом разорвано
-    nclients--; // уменьшаем счетчик активных клиентов
-    printf("-disconnect\n");
-    PRINTNUSERS
 
-        // закрываем сокет
-        closesocket(my_sock);
+        file.close();
+
+        return numOfStr;
+    }
+
+    // Метод непосредственного общения с клиентом (Эхо-режим)
+    void handleClient(SOCKET clientSocket) {
+        const std::string helloMessage = "Hello, Student!\r\n";
+        send(clientSocket, helloMessage.c_str(), static_cast<int>(helloMessage.size()), 0);
+
+        std::vector<char> buffer(20 * 1024);
+        int bytesRecv = 0;
+
+
+        auto ShowVec = [](const std::vector<char> vec) {
+            std::cout << "S<=C: ";
+            for (const auto& n : vec) {
+                std::cout << n;
+            }
+            std::cout << std::endl;
+            return 0;
+            };
+
+        auto SetString = [](const std::vector<char> vec, std::string& command) {
+
+            for (const auto& n : vec) {
+                command += n;
+            }
+            return 0;
+            };
+        std::string command;
+        // Цикл эхо-ответа
+        while ((bytesRecv = recv(clientSocket, buffer.data(), static_cast<int>(buffer.size()), 0)) > 0) {
+
+            send(clientSocket, buffer.data(), bytesRecv, 0);
+
+
+            std::string command(buffer.data(), bytesRecv);
+
+
+            std::cout << "S<=C: " << command << std::endl;
+
+
+            if (!CheckForCommand(command)) {
+                std::cout << "No command" << std::endl;
+            }
+        }
+
+        // Клиент отключился или произошла ошибка
+        m_nclients--;
+        std::cout << "-disconnect\n";
+        printUsersCount();
+
+        closesocket(clientSocket);
+    }
+};
+
+int main() {
+    setlocale(LC_ALL, "RU");
+
+    try {
+        // Создаем экземпляр сервера на порту 666 и запускаем его
+        TcpServer server(666);
+        server.start();
+    }
+    catch (const std::exception& ex) {
+        std::cerr << "Критическая ошибка: " << ex.what() << "\n";
+        return -1;
+    }
+
     return 0;
 }

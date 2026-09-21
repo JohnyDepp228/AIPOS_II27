@@ -1,106 +1,180 @@
-#include <stdio.h>
 #include <iostream>
-#include <string.h>
+#include <string>
+#include <vector>
 #include <winsock2.h>
 #include <windows.h>
 #include <ws2tcpip.h> 
-
+#include <chrono>
+#include <iomanip> 
 
 #pragma comment(lib, "ws2_32.lib")
 
-
-#define PORT 666
-#define SERVERADDR "127.0.0.1"
-
-int main()
-{
-    setlocale(LC_ALL, "RU");
-    char buff[1024];
-    printf("TCP CLIENT\n");
-
-    // Шаг 1 - инициализация библиотеки Winsock
-    if (WSAStartup(0x202, (WSADATA*)&buff[0]))
+class TcpClient {
+public:
+    // Конструктор инициализирует Winsock
+    TcpClient(const std::string& serverIp, int port)
+        : m_serverIp(serverIp), m_port(port), m_socket(INVALID_SOCKET)
     {
-        printf("WSAStart error %d\n", WSAGetLastError());
-        return -1;
+        WSADATA wsaData;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+            throw std::runtime_error("WSAStartup failed. Error: " + std::to_string(WSAGetLastError()));
+        }
     }
 
-    // Шаг 2 - создание сокета
-    SOCKET my_sock;
-    my_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (my_sock < 0)
-    {
-        printf("Socket() error %d\n", WSAGetLastError());
-        return -1;
+    // Деструктор автоматически закрывает ресурсы
+    ~TcpClient() {
+        disconnect();
+        WSACleanup();
     }
 
-    // Шаг 3 - установка соединения
+    // Подключение к серверу
+    void connectToServer() {
+        m_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (m_socket == INVALID_SOCKET) {
+            throw std::runtime_error("Socket creation failed. Error: " + std::to_string(WSAGetLastError()));
+        }
 
-    // заполнение структуры sockaddr_in
-    // указание адреса и порта сервера
-    sockaddr_in dest_addr;
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(PORT);
-    HOSTENT* hst;
+        sockaddr_in destAddr{};
+        destAddr.sin_family = AF_INET;
+        destAddr.sin_port = htons(m_port);
 
-    // преобразование IP адреса из символьного в
-    // сетевой формат
-    if (inet_pton(AF_INET, SERVERADDR, &dest_addr.sin_addr) != 1) {
-        addrinfo hints = { 0 }, * res = nullptr;
-        hints.ai_family = AF_INET;
-        if (getaddrinfo(SERVERADDR, nullptr, &hints, &res) == 0 && res != nullptr) {
-            dest_addr.sin_addr = ((sockaddr_in*)res->ai_addr)->sin_addr;
-            freeaddrinfo(res);
+        // Преобразование IP адреса (проверка строки на валидность адреса / имени хоста)
+        if (inet_pton(AF_INET, m_serverIp.c_str(), &destAddr.sin_addr) != 1) {
+            addrinfo hints{}, * res = nullptr;
+            hints.ai_family = AF_INET;
+
+            if (getaddrinfo(m_serverIp.c_str(), nullptr, &hints, &res) == 0 && res != nullptr) {
+                destAddr.sin_addr = reinterpret_cast<sockaddr_in*>(res->ai_addr)->sin_addr;
+                freeaddrinfo(res);
+            }
+            else {
+                closesocket(m_socket);
+                m_socket = INVALID_SOCKET;
+                throw std::runtime_error("Invalid address or host not found: " + m_serverIp);
+            }
+        }
+
+        // Установка соединения
+        if (connect(m_socket, reinterpret_cast<sockaddr*>(&destAddr), sizeof(destAddr)) == SOCKET_ERROR) {
+            closesocket(m_socket);
+            m_socket = INVALID_SOCKET;
+            throw std::runtime_error("Connect failed. Error: " + std::to_string(WSAGetLastError()));
+        }
+
+        std::cout << "Соединение с " << m_serverIp << " успешно установлено\n";
+        std::cout << "Type quit for quit\n\n";
+    }
+
+    // Основной цикл обмена сообщениями
+    void runCommunicationLoop() {
+        if (m_socket == INVALID_SOCKET) {
+            std::cerr << "Нет активного соединения с сервером.\n";
+            return;
         }
         else {
-            printf("Invalid address %s\n", SERVERADDR); closesocket(my_sock); WSACleanup(); return -1;
+            auto now = std::chrono::system_clock::now();
+
+            std::time_t currentTime = std::chrono::system_clock::to_time_t(now);
+
+
+            std::tm localTime;
+            localtime_s(&localTime, &currentTime);
+
+
+            std::cout << "Start time: "
+                << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S")
+                << std::endl;
+        }
+
+        std::vector<char> buffer(1024);
+        int bytesRecv = 0;
+
+        // Цикл чтения сообщений от сервера
+        while ((bytesRecv = recv(m_socket, buffer.data(), static_cast<int>(buffer.size() - 1), 0)) > 0) {
+            buffer[bytesRecv] = '\0';
+
+
+            auto now = std::chrono::system_clock::now();
+
+            std::time_t currentTime = std::chrono::system_clock::to_time_t(now);
+
+
+            std::tm localTime;
+            localtime_s(&localTime, &currentTime);
+
+            std::cout << "Recieved msg from server at "
+                << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S") << "\t" << buffer.data();
+
+
+            std::cout << "Send to server:  ";
+            std::string userInput;
+            std::getline(std::cin, userInput);
+
+
+            if (userInput == "quit") {
+                std::cout << "Exit...\n";
+                break;
+            }
+
+            // Добавляем символы перевода строки, чтобы сервер читал это как пакет данных
+            userInput += "\r\n";
+
+            // Передаем строку клиента серверу с точным расчетом длины пользовательского ввода
+            if (send(m_socket, userInput.c_str(), static_cast<int>(userInput.size()), 0) == SOCKET_ERROR) {
+                std::cerr << "Send failed. Error: " << WSAGetLastError() << "\n";
+                break;
+            }
+        }
+
+        if (bytesRecv == SOCKET_ERROR) {
+            std::cerr << "Recv error: " << WSAGetLastError() << "\n";
+        }
+
+        disconnect();
+    }
+
+    // Принудительное закрытие сокета
+    void disconnect() {
+        if (m_socket != INVALID_SOCKET) {
+            closesocket(m_socket);
+            auto now = std::chrono::system_clock::now();
+
+            std::time_t currentTime = std::chrono::system_clock::to_time_t(now);
+
+
+            std::tm localTime;
+            localtime_s(&localTime, &currentTime);
+
+
+            std::cout << "End time: "
+                << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S")
+                << std::endl;
+            m_socket = INVALID_SOCKET;
         }
     }
 
-    // адрес сервера получен – пытаемся установить
-    // соединение 
-    if (connect(my_sock, (sockaddr*)&dest_addr,
-        sizeof(dest_addr)))
-    {
-        printf("Connect error %d\n", WSAGetLastError());
+private:
+    std::string m_serverIp;
+    int m_port;
+    SOCKET m_socket;
+};
+
+int main() {
+    setlocale(LC_ALL, "RU");
+    std::cout << "TCP CLIENT\n";
+
+    try {
+        // Создаем экземпляр клиента (IP сервера: 127.0.0.1, Порт: 666)
+        TcpClient client("127.0.0.1", 666);
+
+        // Подключаемся и запускаем цикл обмена сообщениями
+        client.connectToServer();
+        client.runCommunicationLoop();
+    }
+    catch (const std::exception& ex) {
+        std::cerr << "Критическая ошибка: " << ex.what() << "\n";
         return -1;
     }
 
-    printf("Соединение с %s успешно установлено\n\
-    Type quit for quit\n\n", SERVERADDR);
-
-    // Шаг 4 - чтение и передача сообщений
-    int nsize;
-    while ((nsize = recv(my_sock, &buff[0],
-        sizeof(buff) - 1, 0))
-        != SOCKET_ERROR)
-    {
-        // ставим завершающий ноль в конце строки 
-        buff[nsize] = 0;
-
-        // выводим на экран 
-        printf("S=>C:%s", buff);
-
-        // читаем пользовательский ввод с клавиатуры
-        printf("S<=C:"); fgets(&buff[0], sizeof(buff) - 1,
-            stdin);
-
-        // проверка на "quit"
-        if (!strcmp(&buff[0], "quit\n"))
-        {
-            // Корректный выход
-            printf("Exit...");
-            closesocket(my_sock);
-            WSACleanup();
-            return 0;
-        }
-
-        // передаем строку клиента серверу
-        send(my_sock, &buff[0], nsize, 0);
-    }
-
-    printf("Recv error %d\n", WSAGetLastError());
-    closesocket(my_sock);
-    WSACleanup();
-    return -1;
+    return 0;
 }
