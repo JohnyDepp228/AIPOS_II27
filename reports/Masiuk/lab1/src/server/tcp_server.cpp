@@ -6,6 +6,8 @@
 #include <windows.h>
 #include <ws2tcpip.h> 
 #include <fstream>
+#include <chrono>
+#include <iomanip> 
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -49,7 +51,13 @@ public:
         if (listen(m_listenSocket, SOMAXCONN) == SOCKET_ERROR) {
             throw std::runtime_error("Listen failed. Error: " + std::to_string(WSAGetLastError()));
         }
-
+        auto now = std::chrono::system_clock::now();
+                std::time_t currentTime = std::chrono::system_clock::to_time_t(now);
+                std::tm localTime;
+                localtime_s(&localTime, &currentTime);
+                std::cout << "Start time: "
+                << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S")
+                << std::endl;
         std::cout << "TCP Server started on port " << m_port << "\n";
         std::cout << "Waiting for connection...\n";
 
@@ -184,12 +192,19 @@ private:
                 temp.clear();
                 temp += "-1";
                 send(clientSocket, temp.c_str(), (int)temp.size() , 0);
+                auto now = std::chrono::system_clock::now();
+                std::time_t currentTime = std::chrono::system_clock::to_time_t(now);
+                std::tm localTime;
+                localtime_s(&localTime, &currentTime);
+                std::cout << "End time: "
+                << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S")
+                << std::endl;
                 closesocket(clientSocket);
                 exit(1);
             }
             SumOfChar(buffer, bytesRecv, res);
             std::string responseStr = std::to_string(res) + ':' + std::to_string(totalSize);
-            if (bytesRecv == 48) {
+            if (bytesRecv == 5) {
                 responseStr += "\n";
             }
             std::cout << responseStr << std::endl;
